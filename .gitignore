@@ -1,0 +1,24 @@
+# Data
+data/
+dataset/
+pretrained/
+
+# Logs and runs
+logs/
+runs_editflow/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Checkpoints
+*.pt
+*.pth
+
+# Editor
+.vscode/
+.idea/
