@@ -4,7 +4,7 @@ import torch
 
 PROCESSED = os.path.join(os.path.dirname(__file__), 'dataset', 'processed.pt')
 OUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'editpp', 'data')
-OUT_PATH = os.path.join(OUT_DIR, 'weibo_cascade.pkl')
+OUT_PATH = os.path.join(OUT_DIR, 'socialnet_cascade.pkl')
 
 
 def main():
