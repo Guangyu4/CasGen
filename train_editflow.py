@@ -107,7 +107,7 @@ def compute_w1(gen_lens, ref_lens):
 
 def get_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--data', default='dataset/processed.pt')
+    p.add_argument('--data', default='dataset/socialnet_processed.pt')
     p.add_argument('--outdir', default='runs_editflow')
     p.add_argument('--hidden_dim', type=int, default=128)
     p.add_argument('--n_heads', type=int, default=4)

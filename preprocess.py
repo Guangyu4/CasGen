@@ -7,8 +7,8 @@ import torch
 from collections import Counter
 from tqdm import tqdm
 
-RAW_PATH = os.path.join(os.path.dirname(__file__), 'dataset', 'cascades.pt')
-OUT_PATH = os.path.join(os.path.dirname(__file__), 'dataset', 'processed.pt')
+RAW_PATH = os.path.join(os.path.dirname(__file__), 'dataset', 'socialnet_cascades.pt')
+OUT_PATH = os.path.join(os.path.dirname(__file__), 'dataset', 'socialnet_processed.pt')
 
 PAD_IDX = 0
 UNK_IDX = 1

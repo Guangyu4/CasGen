@@ -63,7 +63,7 @@ def compute_count_w1(X, Y, t_max, mean_n):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt', required=True)
-    p.add_argument('--data', default='dataset/processed.pt')
+    p.add_argument('--data', default='dataset/socialnet_processed.pt')
     p.add_argument('--outdir', default=None)
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--n_steps', type=int, default=100)
