@@ -22,18 +22,35 @@ class SinusoidalEmb(nn.Module):
 
 class EditFlowTransformer(nn.Module):
     def __init__(self, hidden_dim=64, n_heads=4, n_layers=4, n_ins_bins=64,
-                 d_max=2, t_max=1.0):
+                 d_max=2, t_max=1.0, cond_dim=0):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.n_ins_bins = n_ins_bins
         self.d_max = d_max
         self.t_max = t_max
+        self.cond_dim = cond_dim
 
         # Flow time conditioning
         self.time_emb = SinusoidalEmb(hidden_dim)
         self.time_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim),
         )
+
+        # Optional global condition projection (BERT text / motivation scores).
+        # cond_expand maps raw cond_dim → _EMBED_DIM so all variants share the
+        # same embedding capacity (bert: Identity; motive: Linear 14→768).
+        # Zero-init the output layer (ControlNet style) for stable start.
+        _EMBED_DIM = 768
+        if cond_dim > 0:
+            self.cond_expand = (
+                nn.Identity() if cond_dim == _EMBED_DIM
+                else nn.Linear(cond_dim, _EMBED_DIM)
+            )
+            self.cond_proj = nn.Sequential(
+                nn.Linear(_EMBED_DIM, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim),
+            )
+            nn.init.zeros_(self.cond_proj[-1].weight)
+            nn.init.zeros_(self.cond_proj[-1].bias)
 
         # Per-event input: time + depth + parent_time -> hidden
         self.event_time_emb = SinusoidalEmb(hidden_dim // 2)
@@ -57,7 +74,7 @@ class EditFlowTransformer(nn.Module):
         # Structured insertion type: >0 → child of left, <0 → sibling of left
         self.head_ins_type = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x_t: DataBatch, t: torch.Tensor) -> LogRate:
+    def forward(self, x_t: DataBatch, t: torch.Tensor, cond=None) -> LogRate:
         dev = x_t.device
         B = x_t.batch_size
         time_seqs = x_t.split_sequences()
@@ -83,9 +100,10 @@ class EditFlowTransformer(nn.Module):
         h_pt = self.pt_emb(pad_pts)                         # (B, L, H/4)
         h = self.input_proj(torch.cat([h_time, h_depth, h_pt], dim=-1))
 
-        # Add flow time conditioning
         t_cond = self.time_mlp(self.time_emb(t))
         h = h + t_cond.unsqueeze(1)
+        if cond is not None and self.cond_dim > 0:
+            h = h + self.cond_proj(self.cond_expand(cond)).unsqueeze(1)
 
         h = self.transformer(h, src_key_padding_mask=pad_mask)
 

@@ -1,0 +1,19 @@
+Loading runs_ablation/full_1862940/best.pt
+Variant: full
+Test set: 410 cascades
+Model loaded (step 28000)
+Generating (100 steps)...
+/gpfsnyu/home/gw2556/.conda/envs/T2S/lib/python3.10/site-packages/torch/nn/modules/transformer.py:408: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. (Triggered internally at ../aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(output, src_key_padding_mask.logical_not(), mask_check=False)
+Generated in 3.3s (ins=34805, del=32672)
+Generated: mean=84.1, median=15
+Reference: mean=78.3, median=16
+Computing MMD...
+  MMD     = 0.030744
+Computing W1(l)...
+  W1(l)   = 0.139509
+Computing W1(t)...
+  W1(t)   = 0.004958
+
+MMD=0.030744  W1(l)=0.139509  W1(t)=0.004958
+Results saved to runs_ablation/full_1862940/eval/

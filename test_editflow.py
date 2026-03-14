@@ -1,17 +1,28 @@
-"""Evaluate depth-aware Edit Flow model."""
+"""Evaluate Edit Flow cascade model (supports uncond / bert / motive / flat / ddpm variants).
+
+Metrics:
+  MMD    - overall event-time distribution (counting-distance kernel)
+  W1(l)  - cascade length (event count) distribution
+  W1(t)  - inter-event time distribution
+"""
 import argparse
+import functools
 import json
 import os
-import time
 import numpy as np
 import torch
 from scipy.stats import wasserstein_distance
 from torch.utils.data import random_split
 
-from editflow import DataBatch, EditFlow
+from editflow import DataBatch, EditFlow, DDPMFlow
 from editflow_model import EditFlowTransformer
-from train_editflow import CascadeSeqDataset, TreeNoise
+from train_editflow import (
+    CascadeSeqDataset, CondCascadeDataset,
+    TreeNoise, FlatNoise, HPPNoise, _make_flat_batch,
+)
 
+
+# ---- Metric helpers ----
 
 def counting_distance(x, Y, t_max):
     x, Y = x.copy(), Y.copy()
@@ -50,23 +61,45 @@ def compute_mmd(X, Y, t_max, sigma=None):
         sigma = np.median(np.concatenate([x_x_d, x_y_d, y_y_d]))
     s2 = sigma ** 2 + 1e-8
     return float(np.sqrt(max(
-        np.mean(np.exp(-x_x_d/(2*s2))) - 2*np.mean(np.exp(-x_y_d/(2*s2))) + np.mean(np.exp(-y_y_d/(2*s2))), 0
+        np.mean(np.exp(-x_x_d / (2 * s2))) - 2 * np.mean(np.exp(-x_y_d / (2 * s2))) +
+        np.mean(np.exp(-y_y_d / (2 * s2))), 0
     ))), float(sigma)
 
 
-def compute_count_w1(X, Y, t_max, mean_n):
+def compute_w1_length(X, Y, t_max, mean_n):
     X_lens = np.array([(s < t_max).sum() for s in X])
     Y_lens = np.array([(s < t_max).sum() for s in Y])
     return float(wasserstein_distance(X_lens / max(mean_n, 1), Y_lens / max(mean_n, 1)))
 
 
+def compute_w1_intertime(X, Y, t_max):
+    def pool_gaps(seqs):
+        gaps = []
+        for seq in seqs:
+            valid = np.sort(seq[seq < t_max])
+            if len(valid) > 1:
+                gaps.extend(np.diff(valid).tolist())
+        return np.array(gaps, dtype=float)
+
+    gen_gaps = pool_gaps(X)
+    ref_gaps = pool_gaps(Y)
+    if len(gen_gaps) == 0 or len(ref_gaps) == 0:
+        return 1.0
+    return float(wasserstein_distance(gen_gaps, ref_gaps))
+
+
+# ---- Main ----
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt', required=True)
-    p.add_argument('--data', default='dataset/socialnet_processed.pt')
+    p.add_argument('--data', default='dataset/socialnet_processed.pt',
+                   help='Pre-processed data (used for uncond/flat/ddpm)')
+    p.add_argument('--cond_data', default=None,
+                   help='Raw data with motivation scores (auto-detected from ckpt args if None)')
     p.add_argument('--outdir', default=None)
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    p.add_argument('--n_steps', type=int, default=100)
+    p.add_argument('--n_steps', type=int, default=None)
     a = p.parse_args()
 
     if a.outdir is None:
@@ -77,8 +110,29 @@ def main():
     ckpt = torch.load(a.ckpt, map_location='cpu', weights_only=False)
     args = argparse.Namespace(**ckpt['args'])
     d_max = ckpt.get('d_max', 2)
+    cond_dim = ckpt.get('cond_dim', 0)
+    variant = ckpt.get('variant', 'uncond')
+    # backward compat: old 'full' checkpoints
+    if variant == 'full':
+        variant = 'uncond'
+    print(f'Variant: {variant}, cond_dim: {cond_dim}')
 
-    dataset = CascadeSeqDataset(a.data, max_events=args.max_events)
+    is_cond = variant in ('bert', 'motive')
+
+    # ---- Load dataset ----
+    if is_cond:
+        cond_data_path = a.cond_data or getattr(args, 'cond_data',
+                                                  'dataset/socialnet_cascades_with_motivation.pt')
+        bert_name = getattr(args, 'bert_model', 'pretrained/bert-base-chinese')
+        bert_device = getattr(args, 'bert_device', 'cpu')
+        dataset = CondCascadeDataset(
+            cond_data_path, cond_type=variant,
+            max_events=args.max_events,
+            bert_name=bert_name, bert_device=bert_device,
+        )
+    else:
+        dataset = CascadeSeqDataset(a.data, max_events=args.max_events)
+
     n = len(dataset)
     n_train, n_val = int(n * 0.8), int(n * 0.1)
     n_test = n - n_train - n_val
@@ -86,38 +140,69 @@ def main():
                                    generator=torch.Generator().manual_seed(args.seed))
     print(f'Test set: {n_test} cascades')
 
+    # ---- Model ----
     model = EditFlowTransformer(
         hidden_dim=args.hidden_dim, n_heads=args.n_heads, n_layers=args.n_layers,
-        n_ins_bins=args.n_ins_bins, d_max=d_max, t_max=dataset.t_max,
+        n_ins_bins=args.n_ins_bins, d_max=d_max, t_max=dataset.t_max, cond_dim=cond_dim,
     ).to(a.device)
     model.load_state_dict(ckpt['model'])
     model.eval()
     print(f'Model loaded (step {ckpt["step"]})')
 
-    noise = TreeNoise(dataset.count_dist, dataset.t_max, d_max)
-    ef = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
-                  rate_penalty=getattr(args, 'rate_penalty', 0.5),
-                  gamma=args.gamma, d_max=d_max)
+    # ---- Variant-specific setup ----
+    lambda_hpp = getattr(args, 'lambda_hpp', 50.0)
+    if variant in ('uncond', 'bert', 'motive'):
+        noise = TreeNoise(dataset.count_dist, dataset.t_max, d_max)
+        flow = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
+                        rate_penalty=getattr(args, 'rate_penalty', 0.5),
+                        gamma=args.gamma, d_max=d_max)
+        default_steps = 100
+    elif variant == 'flat':
+        noise = FlatNoise(dataset.count_dist, dataset.t_max)
+        flow = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
+                        rate_penalty=getattr(args, 'rate_penalty', 0.5),
+                        gamma=0.0, d_max=0)
+        default_steps = 100
+    elif variant == 'ddpm':
+        noise = HPPNoise(lambda_hpp=lambda_hpp, t_max=dataset.t_max)
+        flow = DDPMFlow(n_ins_bins=args.n_ins_bins, lambda_hpp=lambda_hpp,
+                        t_max=dataset.t_max,
+                        rate_penalty=getattr(args, 'rate_penalty', 0.5), d_max=d_max)
+        default_steps = 200
+    else:
+        raise ValueError(f'Unknown variant: {variant}')
+
+    n_steps = a.n_steps if a.n_steps is not None else default_steps
     gen = torch.Generator(device=a.device)
     gen.manual_seed(12345)
 
-    print('Generating...')
+    # ---- Build model_fn with conditioning ----
+    if is_cond:
+        test_conds = torch.stack([dataset.conds[i] for i in test_set.indices]).to(a.device)
+        model_fn = functools.partial(model, cond=test_conds)
+    else:
+        model_fn = model
+
+    import time
+    print(f'Generating ({n_steps} steps, n={n_test})...')
     t0 = time.time()
     x0 = noise.sample(n_test, generator=gen).to(a.device).wrap(prefix=0.0, suffix=dataset.t_max)
-    result, n_ins, n_del = ef.sample(model, x0, n_steps=a.n_steps, generator=gen)
+    result, n_ins, n_del = flow.sample(model_fn, x0, n_steps=n_steps, generator=gen)
     gen_time = time.time() - t0
     print(f'Generated in {gen_time:.1f}s (ins={n_ins}, del={n_del})')
 
-    # Collect results
+    # ---- Collect results ----
     gen_seqs = list(zip(result.split_sequences(), result.split_depth(), result.split_parent_time()))
     ref_items = [dataset.items[i] for i in test_set.indices]
+
+    if variant == 'flat':
+        ref_items = [(t, [0] * len(t), [0.0] * len(t)) for t, d, p in ref_items]
 
     gen_lens = [len(s[0]) for s in gen_seqs]
     ref_lens = [len(r[0]) for r in ref_items]
     print(f'Generated: mean={np.mean(gen_lens):.1f}, median={np.median(gen_lens):.0f}')
     print(f'Reference: mean={np.mean(ref_lens):.1f}, median={np.median(ref_lens):.0f}')
 
-    # Metrics
     gen_time_arrays = [s[0].cpu().numpy() for s in gen_seqs]
     ref_time_arrays = [np.array(r[0]) for r in ref_items]
     t_max = 1.0
@@ -125,22 +210,34 @@ def main():
 
     print('Computing MMD...')
     mmd, sigma = compute_mmd(gen_time_arrays, ref_time_arrays, t_max)
-    print(f'  MMD = {mmd:.6f}')
+    print(f'  MMD     = {mmd:.6f}')
 
-    print('Computing W1...')
-    w1 = compute_count_w1(gen_time_arrays, ref_time_arrays, t_max, mean_n)
-    print(f'  W1 = {w1:.6f}')
+    print('Computing W1(l)...')
+    w1_l = compute_w1_length(gen_time_arrays, ref_time_arrays, t_max, mean_n)
+    print(f'  W1(l)   = {w1_l:.6f}')
 
-    # Save metrics
+    print('Computing W1(t)...')
+    w1_t = compute_w1_intertime(gen_time_arrays, ref_time_arrays, t_max)
+    print(f'  W1(t)   = {w1_t:.6f}')
+
+    print(f'\nMMD={mmd:.6f}  W1(l)={w1_l:.6f}  W1(t)={w1_t:.6f}')
+
+    # ---- Save metrics ----
     results = {
-        'mmd': mmd, 'mmd_sigma': sigma, 'w1_count': w1,
-        'gen_mean_len': float(np.mean(gen_lens)), 'ref_mean_len': float(np.mean(ref_lens)),
-        'gen_time_sec': gen_time, 'step': ckpt['step'],
+        'variant': variant,
+        'mmd': mmd, 'mmd_sigma': sigma,
+        'w1_l': w1_l, 'w1_t': w1_t,
+        'gen_mean_len': float(np.mean(gen_lens)),
+        'ref_mean_len': float(np.mean(ref_lens)),
+        'gen_time_sec': gen_time,
+        'step': ckpt['step'],
+        'n_steps': n_steps,
+        'cond_dim': cond_dim,
     }
     with open(os.path.join(a.outdir, 'metrics.json'), 'w') as f:
         json.dump(results, f, indent=2)
 
-    # Save cascades with tree structure
+    # ---- Save cascades ----
     cascades = []
     for i, (gen_s, ref_r) in enumerate(zip(gen_seqs, ref_items)):
         g_times = gen_s[0].cpu().tolist()
@@ -162,8 +259,7 @@ def main():
     with open(os.path.join(a.outdir, 'generated_cascades.json'), 'w') as f:
         json.dump(cascades, f)
 
-    print(f'\nResults saved to {a.outdir}/')
-    print(f'  MMD: {mmd:.6f}  W1: {w1:.6f}')
+    print(f'Results saved to {a.outdir}/')
 
 
 if __name__ == '__main__':

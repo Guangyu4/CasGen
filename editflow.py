@@ -520,3 +520,149 @@ class EditFlow:
                     best_j = j
             parents[i] = best_j
         return parents
+
+
+# ---- DDPMFlow core ----
+
+class DDPMFlow:
+    """DDPM-style denoising for event sequences using HPP noise.
+
+    Forward process: at time t in [0,1], corrupt x1 by keeping each real event
+    with probability t and adding HPP events at rate lambda_hpp*(1-t).
+    At t=0: pure HPP noise (many events). At t=1: clean data.
+
+    Training loss: supervised denoising — predict which events to delete (HPP events)
+    and where to insert missing real events, without NW alignment.
+    Sampling: same Euler loop as EditFlow, starting from HPP noise (many deletions).
+    """
+
+    def __init__(self, n_ins_bins=64, lambda_hpp=50.0, t_max=1.0,
+                 rate_penalty=0.5, d_max=D_MAX):
+        self.n_ins_bins = n_ins_bins
+        self.lambda_hpp = lambda_hpp
+        self.t_max = t_max
+        self.rate_penalty = rate_penalty
+        self.d_max = d_max
+
+    def corrupt(self, x1_batch, t_vals, rng):
+        """Forward DDPM process on CPU using numpy rng.
+
+        Returns:
+            x_t_seqs: list of np arrays (event times in x_t)
+            del_targets: list of bool arrays, True = HPP event (should delete)
+            ins_targets: list of bool arrays per gap (True = dropped real event in gap)
+        """
+        x_t_seqs, del_targets, ins_targets = [], [], []
+        for i, seq in enumerate(x1_batch.split_sequences()):
+            events = seq.cpu().numpy()
+            n = len(events)
+            t = float(t_vals[i].item())
+
+            # Keep each real event with prob t
+            keep = rng.random(n) < t
+            survived = events[keep]
+            dropped = events[~keep]
+
+            # Add HPP events: Poisson(lambda_hpp * t_max * (1-t))
+            rate = self.lambda_hpp * self.t_max * max(1.0 - t, 0.0)
+            n_hpp = rng.poisson(rate)
+            hpp = rng.uniform(0.0, self.t_max, n_hpp)
+
+            combined = np.concatenate([survived, hpp])
+            is_hpp = np.concatenate([
+                np.zeros(len(survived), dtype=bool),
+                np.ones(n_hpp, dtype=bool),
+            ])
+            order = np.argsort(combined, kind='stable')
+            combined = combined[order]
+            is_hpp = is_hpp[order]
+
+            # Insertion targets: for each event position i in x_t,
+            # should a real event be inserted in the gap AFTER position i?
+            # (gap between combined[i] and combined[i+1], or after last event)
+            n_xt = len(combined)
+            ins_tgt = np.zeros(n_xt, dtype=bool)
+            for d_t in dropped:
+                # Find gap index: the position just to the left of where d_t would go
+                idx = int(np.searchsorted(combined, d_t, side='right')) - 1
+                idx = max(0, min(idx, n_xt - 1))
+                ins_tgt[idx] = True
+
+            x_t_seqs.append(combined)
+            del_targets.append(is_hpp)
+            ins_targets.append(ins_tgt)
+        return x_t_seqs, del_targets, ins_targets
+
+    def compute_loss(self, model, x1_batch, generator=None):
+        dev = x1_batch.device
+        B = x1_batch.batch_size
+
+        t = torch.rand(B, device='cpu')  # keep on CPU for numpy ops
+
+        seed = int(torch.randint(0, 2**31, (1,)).item())
+        rng = np.random.default_rng(seed)
+        x_t_seqs, del_targets_np, ins_targets_np = self.corrupt(x1_batch, t, rng)
+
+        # Build x_t DataBatch (flat: depth=0, parent_time=0)
+        x_t = DataBatch.from_sequences(x_t_seqs).to(dev)
+        x_t = x_t.wrap(prefix=0.0, suffix=self.t_max)
+
+        t_dev = t.to(dev)
+        log_rate = model(x_t, t_dev)
+
+        slt = x_t.seq_lens_tensor
+        first_tok = (x_t.token_pos == 0)
+        last_tok = (x_t.token_pos == (slt - 1)[x_t.seq_idx])
+        not_last = ~last_tok
+        not_pad = ~first_tok & ~last_tok
+
+        # Rate penalty (same as EditFlow)
+        penalty = torch.zeros(B, device=dev)
+        penalty.scatter_add_(0, x_t.seq_idx, log_rate.log_lambda_ins.exp() * not_last)
+        penalty.scatter_add_(0, x_t.seq_idx, log_rate.log_lambda_del.exp() * not_pad)
+
+        # Deletion supervision: HPP events (not_pad positions only) should be deleted
+        del_tgt_list, ins_tgt_list = [], []
+        for del_np, ins_np in zip(del_targets_np, ins_targets_np):
+            # wrap adds prefix+suffix tokens → pad with False on both ends
+            del_tgt_list.append(np.concatenate([[False], del_np, [False]]))
+            ins_tgt_list.append(np.concatenate([[False], ins_np, [False]]))
+
+        del_tgt = torch.tensor(
+            np.concatenate(del_tgt_list), dtype=torch.float32, device=dev
+        )
+        ins_tgt = torch.tensor(
+            np.concatenate(ins_tgt_list), dtype=torch.float32, device=dev
+        )
+
+        del_loss = F.binary_cross_entropy_with_logits(
+            log_rate.log_lambda_del[not_pad], del_tgt[not_pad]
+        )
+        ins_loss = F.binary_cross_entropy_with_logits(
+            log_rate.log_lambda_ins[not_last], ins_tgt[not_last]
+        )
+
+        loss = self.rate_penalty * penalty.mean() + del_loss + ins_loss
+        return loss
+
+    @torch.no_grad()
+    def sample(self, model, noise_batch, n_steps=200, max_seq_len=600, generator=None):
+        """Same Euler loop as EditFlow.sample; starts from HPP noise (many events)."""
+        x_t = noise_batch
+        h = 1.0 / n_steps
+        dev = x_t.device
+        B = x_t.batch_size
+        total_ins, total_del = 0, 0
+
+        for k in range(n_steps):
+            t_val = k / n_steps
+            t = torch.full((B,), t_val, device=dev)
+            log_rate = model(x_t, t)
+            op_ins, op_del, tok_ins, ins_type = log_rate.sample_euler_ops(h, generator=generator)
+            x_t, ni, nd = apply_ops(x_t, op_ins, op_del, tok_ins, ins_type,
+                                     self.n_ins_bins, self.d_max,
+                                     max_seq_len=max_seq_len, generator=generator)
+            total_ins += ni
+            total_del += nd
+
+        return x_t.unwrap(), total_ins, total_del

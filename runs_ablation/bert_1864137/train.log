@@ -1,0 +1,334 @@
+Variant: bert
+Loading data...
+Loading BERT model: pretrained/bert-base-chinese
+  BERT encoding 0/4094...
+  BERT encoding 640/4094...
+  BERT encoding 1280/4094...
+  BERT encoding 1920/4094...
+  BERT encoding 2560/4094...
+  BERT encoding 3200/4094...
+  BERT encoding 3840/4094...
+BERT encoding done: torch.Size([4094, 768])
+CondCascadeDataset: 4094 cascades, cond_dim=768
+Data: 4094 cascades, train=3275, val=409, test=410, D_max=2, cond_dim=768
+Ref lengths: mean=78.3, median=16
+Model params: 966,823
+Training...
+[Step   100] loss=386.2321
+[Step   200] loss=315.0637
+[Step   300] loss=237.4647
+[Step   400] loss=346.6860
+[Step   500] loss=326.1643
+[Step   600] loss=245.9442
+[Step   700] loss=399.0538
+[Step   800] loss=330.1133
+[Step   900] loss=243.3560
+[Step  1000] loss=199.3875
+[Step  1100] loss=189.0542
+[Step  1200] loss=181.8094
+[Step  1300] loss=304.8014
+[Step  1400] loss=341.4176
+[Step  1500] loss=149.1814
+[Step  1600] loss=249.2969
+[Step  1700] loss=284.5455
+[Step  1800] loss=256.3999
+[Step  1900] loss=155.8940
+[Step  2000] loss=314.0778
+/gpfsnyu/home/gw2556/.conda/envs/T2S/lib/python3.10/site-packages/torch/nn/modules/transformer.py:408: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. (Triggered internally at ../aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(output, src_key_padding_mask.logical_not(), mask_check=False)
+  [Eval] gen_mean=83.9 gen_median=28 ref_mean=78.3 W1=0.2747 ins=16046 del=13911 depth_dist=[116/12960/3713]
+[Step  2100] loss=221.3833
+[Step  2200] loss=288.9150
+[Step  2300] loss=278.8584
+[Step  2400] loss=282.4974
+[Step  2500] loss=249.2340
+[Step  2600] loss=260.9114
+[Step  2700] loss=247.7668
+[Step  2800] loss=330.4444
+[Step  2900] loss=287.0072
+[Step  3000] loss=248.8889
+[Step  3100] loss=179.7367
+[Step  3200] loss=121.6082
+[Step  3300] loss=257.5553
+[Step  3400] loss=311.5285
+[Step  3500] loss=266.4225
+[Step  3600] loss=149.0668
+[Step  3700] loss=264.5031
+[Step  3800] loss=243.3754
+[Step  3900] loss=197.0559
+[Step  4000] loss=302.7774
+  [Eval] gen_mean=52.7 gen_median=10 ref_mean=78.3 W1=0.3272 ins=10576 del=11918 depth_dist=[64/8812/1655]
+[Step  4100] loss=308.1971
+[Step  4200] loss=212.1347
+[Step  4300] loss=287.7403
+[Step  4400] loss=281.3143
+[Step  4500] loss=230.7251
+[Step  4600] loss=110.3445
+[Step  4700] loss=303.5685
+[Step  4800] loss=270.5802
+[Step  4900] loss=203.8070
+[Step  5000] loss=209.0214
+[Step  5100] loss=202.5893
+[Step  5200] loss=247.0386
+[Step  5300] loss=236.5808
+[Step  5400] loss=277.4935
+[Step  5500] loss=298.3759
+[Step  5600] loss=343.5418
+[Step  5700] loss=350.2148
+[Step  5800] loss=242.9350
+[Step  5900] loss=311.7219
+[Step  6000] loss=321.1108
+  [Eval] gen_mean=58.6 gen_median=11 ref_mean=78.3 W1=0.2691 ins=11643 del=12944 depth_dist=[87/8732/2895]
+[Step  6100] loss=305.5529
+[Step  6200] loss=264.2458
+[Step  6300] loss=220.2970
+[Step  6400] loss=238.5156
+[Step  6500] loss=246.6205
+[Step  6600] loss=261.0091
+[Step  6700] loss=338.5781
+[Step  6800] loss=175.2843
+[Step  6900] loss=319.4278
+[Step  7000] loss=292.5431
+[Step  7100] loss=170.3263
+[Step  7200] loss=257.7027
+[Step  7300] loss=279.9718
+[Step  7400] loss=311.5811
+[Step  7500] loss=220.7064
+[Step  7600] loss=190.8221
+[Step  7700] loss=258.0022
+[Step  7800] loss=220.4789
+[Step  7900] loss=145.7148
+[Step  8000] loss=273.4636
+  [Eval] gen_mean=73.6 gen_median=12 ref_mean=78.3 W1=0.1643 ins=14547 del=13063 depth_dist=[85/11905/2738]
+[Step  8100] loss=244.5849
+[Step  8200] loss=153.5388
+[Step  8300] loss=179.2986
+[Step  8400] loss=236.3279
+[Step  8500] loss=316.0711
+[Step  8600] loss=220.3808
+[Step  8700] loss=177.6459
+[Step  8800] loss=208.2047
+[Step  8900] loss=184.1095
+[Step  9000] loss=101.6060
+[Step  9100] loss=262.4599
+[Step  9200] loss=357.0689
+[Step  9300] loss=236.2066
+[Step  9400] loss=252.3313
+[Step  9500] loss=265.2068
+[Step  9600] loss=246.9945
+[Step  9700] loss=293.9805
+[Step  9800] loss=233.3551
+[Step  9900] loss=209.8633
+[Step 10000] loss=294.3617
+  [Eval] gen_mean=68.1 gen_median=26 ref_mean=78.3 W1=0.2719 ins=13256 del=17914 depth_dist=[94/10353/3167]
+[Step 10100] loss=188.4312
+[Step 10200] loss=209.8804
+[Step 10300] loss=229.6942
+[Step 10400] loss=206.9249
+[Step 10500] loss=136.5992
+[Step 10600] loss=108.9075
+[Step 10700] loss=256.2363
+[Step 10800] loss=179.8895
+[Step 10900] loss=218.1524
+[Step 11000] loss=251.0652
+[Step 11100] loss=193.8822
+[Step 11200] loss=238.7866
+[Step 11300] loss=248.2848
+[Step 11400] loss=301.0408
+[Step 11500] loss=219.5123
+[Step 11600] loss=215.2953
+[Step 11700] loss=224.8460
+[Step 11800] loss=306.8253
+[Step 11900] loss=124.1219
+[Step 12000] loss=308.7813
+  [Eval] gen_mean=61.7 gen_median=19 ref_mean=78.3 W1=0.2758 ins=11995 del=15613 depth_dist=[103/10446/1783]
+[Step 12100] loss=380.2521
+[Step 12200] loss=200.1734
+[Step 12300] loss=171.4896
+[Step 12400] loss=306.6272
+[Step 12500] loss=126.9566
+[Step 12600] loss=271.6382
+[Step 12700] loss=109.3010
+[Step 12800] loss=315.6848
+[Step 12900] loss=278.8108
+[Step 13000] loss=206.7494
+[Step 13100] loss=226.9835
+[Step 13200] loss=165.7986
+[Step 13300] loss=185.7122
+[Step 13400] loss=448.6115
+[Step 13500] loss=268.6117
+[Step 13600] loss=369.0949
+[Step 13700] loss=299.5251
+[Step 13800] loss=118.0750
+[Step 13900] loss=278.3639
+[Step 14000] loss=252.2960
+  [Eval] gen_mean=60.8 gen_median=13 ref_mean=78.3 W1=0.2876 ins=12167 del=13865 depth_dist=[79/10282/1802]
+[Step 14100] loss=171.8766
+[Step 14200] loss=243.0723
+[Step 14300] loss=378.1819
+[Step 14400] loss=295.7074
+[Step 14500] loss=212.8812
+[Step 14600] loss=200.2336
+[Step 14700] loss=275.1830
+[Step 14800] loss=184.3916
+[Step 14900] loss=383.1584
+[Step 15000] loss=174.1212
+[Step 15100] loss=265.9160
+[Step 15200] loss=261.9297
+[Step 15300] loss=283.7369
+[Step 15400] loss=219.1369
+[Step 15500] loss=197.8520
+[Step 15600] loss=301.8685
+[Step 15700] loss=108.6028
+[Step 15800] loss=345.8957
+[Step 15900] loss=255.2968
+[Step 16000] loss=250.6168
+  [Eval] gen_mean=42.5 gen_median=13 ref_mean=78.3 W1=0.5136 ins=8441 del=13058 depth_dist=[94/6991/1411]
+[Step 16100] loss=355.4229
+[Step 16200] loss=204.8579
+[Step 16300] loss=230.2795
+[Step 16400] loss=244.1290
+[Step 16500] loss=216.4352
+[Step 16600] loss=138.5099
+[Step 16700] loss=376.2154
+[Step 16800] loss=313.7005
+[Step 16900] loss=350.7784
+[Step 17000] loss=249.0537
+[Step 17100] loss=374.9636
+[Step 17200] loss=199.1883
+[Step 17300] loss=177.9850
+[Step 17400] loss=169.6117
+[Step 17500] loss=209.5710
+[Step 17600] loss=215.0673
+[Step 17700] loss=221.1015
+[Step 17800] loss=241.6640
+[Step 17900] loss=235.8250
+[Step 18000] loss=278.9271
+  [Eval] gen_mean=55.2 gen_median=14 ref_mean=78.3 W1=0.3421 ins=10789 del=16332 depth_dist=[90/9607/1343]
+[Step 18100] loss=242.6212
+[Step 18200] loss=223.8914
+[Step 18300] loss=344.8992
+[Step 18400] loss=259.6470
+[Step 18500] loss=289.5101
+[Step 18600] loss=195.7864
+[Step 18700] loss=231.9560
+[Step 18800] loss=299.8966
+[Step 18900] loss=252.2007
+[Step 19000] loss=214.1038
+[Step 19100] loss=211.7691
+[Step 19200] loss=294.2407
+[Step 19300] loss=297.4630
+[Step 19400] loss=179.6662
+[Step 19500] loss=184.2047
+[Step 19600] loss=256.8922
+[Step 19700] loss=254.6022
+[Step 19800] loss=369.5593
+[Step 19900] loss=230.8387
+[Step 20000] loss=269.8532
+  [Eval] gen_mean=27.9 gen_median=11 ref_mean=78.3 W1=0.6709 ins=5523 del=15877 depth_dist=[85/4487/1000]
+[Step 20100] loss=342.2251
+[Step 20200] loss=147.7290
+[Step 20300] loss=301.2475
+[Step 20400] loss=249.8498
+[Step 20500] loss=202.4430
+[Step 20600] loss=393.3067
+[Step 20700] loss=157.2270
+[Step 20800] loss=153.6652
+[Step 20900] loss=261.7003
+[Step 21000] loss=298.5363
+[Step 21100] loss=288.0932
+[Step 21200] loss=169.1636
+[Step 21300] loss=290.6031
+[Step 21400] loss=168.0179
+[Step 21500] loss=217.6810
+[Step 21600] loss=344.4626
+[Step 21700] loss=286.7397
+[Step 21800] loss=215.2867
+[Step 21900] loss=388.2979
+[Step 22000] loss=229.5388
+  [Eval] gen_mean=38.9 gen_median=11 ref_mean=78.3 W1=0.5303 ins=7913 del=16546 depth_dist=[71/6466/1241]
+[Step 22100] loss=173.8042
+[Step 22200] loss=210.1247
+[Step 22300] loss=269.8926
+[Step 22400] loss=115.9389
+[Step 22500] loss=280.6797
+[Step 22600] loss=223.8820
+[Step 22700] loss=116.1368
+[Step 22800] loss=272.5228
+[Step 22900] loss=192.7839
+[Step 23000] loss=304.6959
+[Step 23100] loss=141.3059
+[Step 23200] loss=188.7654
+[Step 23300] loss=208.7707
+[Step 23400] loss=262.8981
+[Step 23500] loss=201.4267
+[Step 23600] loss=205.3157
+[Step 23700] loss=225.5063
+[Step 23800] loss=216.0753
+[Step 23900] loss=115.2762
+[Step 24000] loss=305.8721
+  [Eval] gen_mean=37.7 gen_median=12 ref_mean=78.3 W1=0.5394 ins=7638 del=19576 depth_dist=[99/6181/1260]
+[Step 24100] loss=173.3081
+[Step 24200] loss=256.7024
+[Step 24300] loss=289.1052
+[Step 24400] loss=237.4865
+[Step 24500] loss=315.5158
+[Step 24600] loss=273.2543
+[Step 24700] loss=206.2918
+[Step 24800] loss=168.4149
+[Step 24900] loss=187.6434
+[Step 25000] loss=265.4375
+[Step 25100] loss=327.9525
+[Step 25200] loss=307.9582
+[Step 25300] loss=275.5284
+[Step 25400] loss=129.0050
+[Step 25500] loss=317.1611
+[Step 25600] loss=313.9336
+[Step 25700] loss=228.5460
+[Step 25800] loss=325.3555
+[Step 25900] loss=165.2063
+[Step 26000] loss=366.3728
+  [Eval] gen_mean=28.8 gen_median=10 ref_mean=78.3 W1=0.6408 ins=6063 del=12774 depth_dist=[75/4735/947]
+[Step 26100] loss=261.8333
+[Step 26200] loss=269.3317
+[Step 26300] loss=89.8699
+[Step 26400] loss=261.7178
+[Step 26500] loss=365.3637
+[Step 26600] loss=202.9324
+[Step 26700] loss=356.0384
+[Step 26800] loss=280.1306
+[Step 26900] loss=187.9876
+[Step 27000] loss=292.4472
+[Step 27100] loss=250.5542
+[Step 27200] loss=191.9339
+[Step 27300] loss=200.1783
+[Step 27400] loss=273.6525
+[Step 27500] loss=287.3585
+[Step 27600] loss=339.9713
+[Step 27700] loss=297.2820
+[Step 27800] loss=199.9532
+[Step 27900] loss=165.1205
+[Step 28000] loss=187.5573
+  [Eval] gen_mean=33.9 gen_median=10 ref_mean=78.3 W1=0.5834 ins=6832 del=14180 depth_dist=[76/5907/793]
+[Step 28100] loss=209.6760
+[Step 28200] loss=297.3040
+[Step 28300] loss=222.8251
+[Step 28400] loss=326.1330
+[Step 28500] loss=214.5242
+[Step 28600] loss=310.0470
+[Step 28700] loss=169.9631
+[Step 28800] loss=248.7482
+[Step 28900] loss=140.0235
+[Step 29000] loss=288.0555
+[Step 29100] loss=216.4279
+[Step 29200] loss=211.3428
+[Step 29300] loss=232.4600
+[Step 29400] loss=169.0818
+[Step 29500] loss=199.5267
+[Step 29600] loss=218.3652
+[Step 29700] loss=207.0161
+[Step 29800] loss=188.8380
+[Step 29900] loss=165.2422
+[Step 30000] loss=185.4910
+  [Eval] gen_mean=29.9 gen_median=11 ref_mean=78.3 W1=0.6273 ins=6094 del=16989 depth_dist=[71/4669/1235]
+Training complete. Best W1: 0.1643

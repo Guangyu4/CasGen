@@ -1,18 +1,86 @@
-"""Training script for depth-aware Edit Flow cascade model."""
+"""Training script for Edit Flow cascade model.
+
+Variants:
+  uncond  - tree noise + Flow Matching, no conditioning  (replaces old 'full')
+  bert    - tree noise + Flow Matching + BERT text conditioning
+  motive  - tree noise + Flow Matching + 14-dim motivation score conditioning
+  flat    - flat Poisson noise, no tree structure  (ablation: W/o Tree)
+  ddpm    - HPP noise + DDPM-style denoising       (ablation: W/o Flowmatching)
+"""
 import argparse
+import functools
 import os
-import time
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from scipy.stats import wasserstein_distance
-from editflow import DataBatch, EditFlow, D_MAX, GAMMA
+from editflow import DataBatch, EditFlow, DDPMFlow, D_MAX, GAMMA
 from editflow_model import EditFlowTransformer
 
 
-# ---- Data ----
+# ---- Raw cascade processing helpers ----
+
+def _process_cascade_raw(cascade):
+    """Process a raw cascade dict into times/depths/parent_times tensors."""
+    root_user = cascade['root_user']
+    nodes = cascade['nodes']
+    t_max = cascade.get('t_max', 1.0)
+    if t_max <= 0:
+        t_max = 1.0
+    user_times = {}
+    times, depths, parent_times = [], [], []
+    for node in nodes:
+        uid = node['user_id']
+        t = node['time'] / t_max
+        depth = len(node['path']) - 1
+        puid = node['parent_user_id']
+        if puid is None or puid == root_user:
+            pt = 0.0
+        elif puid in user_times:
+            cands = [tp for tp in user_times[puid] if tp <= t]
+            pt = max(cands) if cands else 0.0
+        else:
+            pt = 0.0
+        times.append(t)
+        depths.append(depth)
+        parent_times.append(pt)
+        user_times.setdefault(uid, []).append(t)
+    return {
+        'times': torch.tensor(times, dtype=torch.float32),
+        'depths': torch.tensor(depths, dtype=torch.long),
+        'parent_times': torch.tensor(parent_times, dtype=torch.float32),
+    }
+
+
+def _encode_bert(texts, bert_name='bert-base-uncased', device='cpu', batch_size=64):
+    """Pre-compute BERT CLS embeddings for a list of texts. Returns list of (768,) tensors."""
+    from transformers import AutoTokenizer, AutoModel
+    print(f'Loading BERT model: {bert_name}')
+    tokenizer = AutoTokenizer.from_pretrained(bert_name)
+    bert_model = AutoModel.from_pretrained(bert_name).to(device)
+    bert_model.eval()
+    all_embs = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        enc = tokenizer(batch, return_tensors='pt', padding=True, truncation=True, max_length=128)
+        enc = {k: v.to(device) for k, v in enc.items()}
+        with torch.no_grad():
+            out = bert_model(**enc)
+        all_embs.append(out.last_hidden_state[:, 0, :].cpu())
+        if (i // batch_size) % 10 == 0:
+            print(f'  BERT encoding {i}/{len(texts)}...')
+    del bert_model
+    if device != 'cpu':
+        torch.cuda.empty_cache()
+    embs = torch.cat(all_embs, dim=0)
+    print(f'BERT encoding done: {embs.shape}')
+    return list(embs)  # list of (768,) tensors
+
+
+# ---- Datasets ----
 
 class CascadeSeqDataset(Dataset):
+    """Dataset from pre-processed .pt file (no conditioning)."""
     def __init__(self, processed_path, max_events=500):
         data = torch.load(processed_path, map_location='cpu', weights_only=False)
         self.items = []
@@ -25,19 +93,76 @@ class CascadeSeqDataset(Dataset):
             self.items.append((t.tolist(), d.tolist(), p.tolist()))
         self.stats = data['stats']
         counts = [len(item[0]) for item in self.items]
-        max_c = max(counts)
-        hist = torch.zeros(max_c + 1)
+        hist = torch.zeros(max(counts) + 1)
         for c in counts:
             hist[c] += 1
         self.count_dist = hist / hist.sum()
         self.t_max = 1.0
         self.d_max = self.stats['D_max']
+        self.cond_dim = 0
 
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, idx):
         return self.items[idx]
+
+
+class CondCascadeDataset(Dataset):
+    """Loads socialnet_cascades_with_motivation.pt and builds conditioning vectors.
+
+    cond_type='bert':   768-dim BERT CLS embedding of cascade text
+    cond_type='motive': 14-dim motivation scores (normalized to [0,1])
+    """
+    COND_DIM = {'bert': 768, 'motive': 14}
+
+    def __init__(self, raw_cond_path, cond_type, max_events=500,
+                 bert_name='bert-base-uncased', bert_device='cpu'):
+        assert cond_type in self.COND_DIM, f'Unknown cond_type: {cond_type}'
+        raw = torch.load(raw_cond_path, map_location='cpu', weights_only=False)
+        self.items, self.conds, texts = [], [], []
+        for c in raw:
+            if len(c.get('nodes', [])) == 0:
+                continue
+            if cond_type == 'motive' and 'motivation_scores' not in c:
+                continue
+            proc = _process_cascade_raw(c)
+            t = proc['times'][:max_events].tolist()
+            if not t:
+                continue
+            self.items.append((
+                t,
+                proc['depths'][:max_events].tolist(),
+                proc['parent_times'][:max_events].tolist(),
+            ))
+            if cond_type == 'motive':
+                self.conds.append(c['motivation_scores'].float() / 5.0)
+            else:
+                texts.append(c.get('text', ''))
+        if cond_type == 'bert':
+            self.conds = _encode_bert(texts, bert_name, bert_device)
+
+        counts = [len(it[0]) for it in self.items]
+        all_d = [d for _, ds, _ in self.items for d in ds]
+        hist = torch.zeros(max(counts) + 1)
+        for c in counts:
+            hist[c] += 1
+        self.count_dist = hist / hist.sum()
+        self.t_max = 1.0
+        self.d_max = max(all_d) if all_d else 2
+        self.cond_dim = self.COND_DIM[cond_type]
+        self.stats = {
+            'D_max': self.d_max, 'n_max': max(counts),
+            'n_cascades': len(self.items), 'avg_len': sum(counts) / len(counts),
+        }
+        print(f'CondCascadeDataset: {len(self.items)} cascades, cond_dim={self.cond_dim}')
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        t, d, p = self.items[idx]
+        return t, d, p, self.conds[idx]
 
 
 def collate_fn(batch):
@@ -47,18 +172,18 @@ def collate_fn(batch):
     return DataBatch.from_sequences(ts, ds, ps)
 
 
+def collate_fn_cond(batch):
+    ts = [item[0] for item in batch]
+    ds = [item[1] for item in batch]
+    ps = [item[2] for item in batch]
+    cs = [item[3] for item in batch]
+    return DataBatch.from_sequences(ts, ds, ps), torch.stack(cs)
+
+
+# ---- Noise generators ----
+
 class TreeNoise:
-    """Generates structurally valid random trees as noise.
-
-    Each noise sample is a valid cascade tree grown by a random attachment process:
-    - Nodes are added one at a time, each attaching to a uniformly random earlier node as parent.
-    - Times are uniformly sampled and sorted, so parent_time < child_time is always satisfied.
-    - Depths are derived from the tree structure (parent_depth + 1), clamped to d_max.
-
-    This produces noise that is structurally coherent (valid trees), so the EditFlow alignment
-    between noise and data involves tree-like edit operations (leaf insertions/deletions) rather
-    than wholesale structural rewrites.
-    """
+    """Structurally valid random trees as noise (valid cascade tree by random attachment)."""
     def __init__(self, count_dist, t_max, d_max):
         self.count_dist = count_dist
         self.t_max = t_max
@@ -81,7 +206,6 @@ class TreeNoise:
         counts = torch.multinomial(
             self.count_dist.to(dev), n, replacement=True, generator=generator
         )
-        # Build trees on CPU with numpy (tree structure requires Python loops)
         cpu_gen = torch.Generator(device='cpu')
         seed = int(torch.randint(0, 2**31, (1,), generator=cpu_gen).item())
         rng = np.random.default_rng(seed)
@@ -94,6 +218,48 @@ class TreeNoise:
         return DataBatch.from_sequences(t_seqs, d_seqs, p_seqs).to(dev)
 
 
+class FlatNoise:
+    """Flat Poisson noise: same count distribution but no tree structure (depth=0, parent_time=0)."""
+    def __init__(self, count_dist, t_max):
+        self.count_dist = count_dist
+        self.t_max = t_max
+
+    def sample(self, n, generator=None):
+        dev = generator.device if generator else 'cpu'
+        counts = torch.multinomial(
+            self.count_dist.to(dev), n, replacement=True, generator=generator
+        )
+        t_seqs = []
+        for count in counts.cpu().tolist():
+            count = int(count)
+            if count == 0:
+                t_seqs.append(torch.empty(0, dtype=torch.float32))
+            else:
+                t_seqs.append(torch.sort(torch.rand(count) * self.t_max)[0])
+        return DataBatch.from_sequences(t_seqs).to(dev)
+
+
+class HPPNoise:
+    """High-rate Homogeneous Poisson Process noise for the DDPM variant."""
+    def __init__(self, lambda_hpp, t_max):
+        self.lambda_hpp = lambda_hpp
+        self.t_max = t_max
+
+    def sample(self, n, generator=None):
+        dev = generator.device if generator else 'cpu'
+        seed = int(torch.randint(0, 2**31, (1,)).item())
+        rng = np.random.default_rng(seed)
+        t_seqs = []
+        for _ in range(n):
+            count = rng.poisson(self.lambda_hpp * self.t_max)
+            if count == 0:
+                t_seqs.append(torch.empty(0, dtype=torch.float32))
+            else:
+                times = np.sort(rng.uniform(0.0, self.t_max, count))
+                t_seqs.append(torch.tensor(times, dtype=torch.float32))
+        return DataBatch.from_sequences(t_seqs).to(dev)
+
+
 def compute_w1(gen_lens, ref_lens):
     g = np.array(gen_lens, dtype=float)
     r = np.array(ref_lens, dtype=float)
@@ -103,11 +269,22 @@ def compute_w1(gen_lens, ref_lens):
     return float(wasserstein_distance(g / mean_r, r / mean_r))
 
 
-# ---- Training ----
+# ---- Args ----
 
 def get_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--data', default='dataset/socialnet_processed.pt')
+    p.add_argument('--variant', choices=['uncond', 'bert', 'motive', 'flat', 'ddpm'],
+                   default='uncond',
+                   help='uncond=no cond, bert=BERT text cond, motive=14-dim motivation cond, '
+                        'flat=W/o Tree, ddpm=W/o Flowmatching')
+    p.add_argument('--data', default='dataset/socialnet_processed.pt',
+                   help='Pre-processed data path (used for uncond/flat/ddpm)')
+    p.add_argument('--cond_data', default='dataset/socialnet_cascades_with_motivation.pt',
+                   help='Raw data with motivation scores (used for bert/motive)')
+    p.add_argument('--bert_model', default='pretrained/bert-base-chinese',
+                   help='BERT model local path or HuggingFace name (used for bert variant)')
+    p.add_argument('--bert_device', default='cpu',
+                   help='Device for pre-computing BERT embeddings')
     p.add_argument('--outdir', default='runs_editflow')
     p.add_argument('--hidden_dim', type=int, default=128)
     p.add_argument('--n_heads', type=int, default=4)
@@ -116,6 +293,7 @@ def get_args():
     p.add_argument('--delta', type=float, default=0.05)
     p.add_argument('--gamma', type=float, default=0.3)
     p.add_argument('--rate_penalty', type=float, default=1.0)
+    p.add_argument('--lambda_hpp', type=float, default=50.0)
     p.add_argument('--max_events', type=int, default=500)
     p.add_argument('--max_steps', type=int, default=30000)
     p.add_argument('--batch_size', type=int, default=128)
@@ -128,13 +306,35 @@ def get_args():
     return p.parse_args()
 
 
+def _make_flat_batch(batch):
+    """Strip tree structure: set all depth=0 and parent_time=0."""
+    seqs = batch.split_sequences()
+    return DataBatch.from_sequences(seqs)
+
+
+# ---- Training ----
+
 def main():
     args = get_args()
     torch.manual_seed(args.seed)
     os.makedirs(args.outdir, exist_ok=True)
 
+    is_cond = args.variant in ('bert', 'motive')
+    print(f'Variant: {args.variant}')
+
+    # ---- Load dataset ----
     print('Loading data...')
-    dataset = CascadeSeqDataset(args.data, max_events=args.max_events)
+    if is_cond:
+        dataset = CondCascadeDataset(
+            args.cond_data, cond_type=args.variant,
+            max_events=args.max_events,
+            bert_name=args.bert_model, bert_device=args.bert_device,
+        )
+        cond_dim = dataset.cond_dim
+    else:
+        dataset = CascadeSeqDataset(args.data, max_events=args.max_events)
+        cond_dim = 0
+
     n = len(dataset)
     n_train = int(n * 0.8)
     n_val = int(n * 0.1)
@@ -143,27 +343,52 @@ def main():
         dataset, [n_train, n_val, n_test],
         generator=torch.Generator().manual_seed(args.seed),
     )
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
-                              collate_fn=collate_fn, drop_last=True)
 
-    ref_lens = [len(dataset.items[i][0]) for i in test_set.indices]
+    cf = collate_fn_cond if is_cond else collate_fn
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=cf, drop_last=True)
+
+    ref_lens = [len(dataset.items[i][0]) for i in val_set.indices]
     d_max = dataset.d_max
-    print(f'Data: {n} cascades, train={n_train}, val={n_val}, test={n_test}, D_max={d_max}')
+    print(f'Data: {n} cascades, train={n_train}, val={n_val}, test={n_test}, '
+          f'D_max={d_max}, cond_dim={cond_dim}')
     print(f'Ref lengths: mean={np.mean(ref_lens):.1f}, median={np.median(ref_lens):.0f}')
 
-    noise = TreeNoise(dataset.count_dist, dataset.t_max, d_max)
-    ef = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
-                  rate_penalty=args.rate_penalty, gamma=args.gamma, d_max=d_max)
+    # Pre-fetch val conditioning vectors for eval loop
+    if is_cond:
+        n_eval = min(args.n_val_samples, len(val_set))
+        val_cond_list = [dataset.conds[val_set.indices[i]] for i in range(n_eval)]
+        val_conds = torch.stack(val_cond_list)  # (n_eval, cond_dim), kept on CPU
+    else:
+        n_eval = args.n_val_samples
+        val_conds = None
+
+    # ---- Variant-specific setup ----
+    if args.variant in ('uncond', 'bert', 'motive'):
+        noise = TreeNoise(dataset.count_dist, dataset.t_max, d_max)
+        flow = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
+                        rate_penalty=args.rate_penalty, gamma=args.gamma, d_max=d_max)
+    elif args.variant == 'flat':
+        noise = FlatNoise(dataset.count_dist, dataset.t_max)
+        flow = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
+                        rate_penalty=args.rate_penalty, gamma=0.0, d_max=0)
+        d_max = 0
+    elif args.variant == 'ddpm':
+        mean_n = float(np.mean([len(item[0]) for item in dataset.items]))
+        lambda_hpp = args.lambda_hpp if args.lambda_hpp > 0 else 5.0 * mean_n
+        noise = HPPNoise(lambda_hpp=lambda_hpp, t_max=dataset.t_max)
+        flow = DDPMFlow(n_ins_bins=args.n_ins_bins, lambda_hpp=lambda_hpp,
+                        t_max=dataset.t_max, rate_penalty=args.rate_penalty, d_max=d_max)
+        print(f'HPP rate: {lambda_hpp:.1f} events/unit-time')
 
     model = EditFlowTransformer(
         hidden_dim=args.hidden_dim, n_heads=args.n_heads, n_layers=args.n_layers,
-        n_ins_bins=args.n_ins_bins, d_max=d_max, t_max=dataset.t_max,
+        n_ins_bins=args.n_ins_bins, d_max=d_max, t_max=dataset.t_max, cond_dim=cond_dim,
     ).to(args.device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Model params: {n_params:,}')
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    # Cosine LR decay: helps model stabilize around the good balance it finds early on
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.max_steps, eta_min=args.lr * 0.05
     )
@@ -177,34 +402,45 @@ def main():
     print('Training...')
     while step < args.max_steps:
         try:
-            x1_batch = next(train_iter)
+            batch = next(train_iter)
         except StopIteration:
             train_iter = iter(train_loader)
-            x1_batch = next(train_iter)
+            batch = next(train_iter)
+
+        if is_cond:
+            x1_batch, cond_batch = batch
+            cond_batch = cond_batch.to(args.device)
+        else:
+            x1_batch = batch
+            cond_batch = None
 
         x1_batch = x1_batch.to(args.device)
-        x0_batch = noise.sample(x1_batch.batch_size, generator=gen).to(args.device)
-        # Length coupling: sort both by count and pair similar-length sequences.
-        # This reduces average edit distance and creates more balanced ins/del signal.
-        idx0 = sorted(range(x0_batch.batch_size), key=lambda i: x0_batch.seq_lens[i])
-        idx1 = sorted(range(x1_batch.batch_size), key=lambda i: x1_batch.seq_lens[i])
-        inv1 = [0] * x1_batch.batch_size
-        for rank, orig in enumerate(idx1):
-            inv1[orig] = rank
-        seqs0 = x0_batch.split_sequences()
-        deps0 = x0_batch.split_depth()
-        pts0 = x0_batch.split_parent_time()
-        paired = [None] * x0_batch.batch_size
-        for rank, orig1 in enumerate(idx1):
-            orig0 = idx0[rank]
-            paired[orig1] = (seqs0[orig0], deps0[orig0], pts0[orig0])
-        x0_batch = DataBatch.from_sequences(
-            [p[0] for p in paired], [p[1] for p in paired], [p[2] for p in paired]
-        )
-        x1_wrapped = x1_batch.wrap(prefix=0.0, suffix=dataset.t_max)
-        x0_wrapped = x0_batch.wrap(prefix=0.0, suffix=dataset.t_max)
 
-        loss = ef.compute_loss(model, x0_wrapped, x1_wrapped, generator=gen)
+        if args.variant == 'flat':
+            x1_batch = _make_flat_batch(x1_batch).to(args.device)
+
+        model_fn = functools.partial(model, cond=cond_batch) if cond_batch is not None else model
+
+        if args.variant == 'ddpm':
+            x1_wrapped = x1_batch.wrap(prefix=0.0, suffix=dataset.t_max)
+            loss = flow.compute_loss(model_fn, x1_wrapped, generator=gen)
+        else:
+            x0_batch = noise.sample(x1_batch.batch_size, generator=gen).to(args.device)
+            idx0 = sorted(range(x0_batch.batch_size), key=lambda i: x0_batch.seq_lens[i])
+            idx1 = sorted(range(x1_batch.batch_size), key=lambda i: x1_batch.seq_lens[i])
+            seqs0 = x0_batch.split_sequences()
+            deps0 = x0_batch.split_depth()
+            pts0 = x0_batch.split_parent_time()
+            paired = [None] * x0_batch.batch_size
+            for rank, orig1 in enumerate(idx1):
+                orig0 = idx0[rank]
+                paired[orig1] = (seqs0[orig0], deps0[orig0], pts0[orig0])
+            x0_batch = DataBatch.from_sequences(
+                [p[0] for p in paired], [p[1] for p in paired], [p[2] for p in paired]
+            )
+            x1_wrapped = x1_batch.wrap(prefix=0.0, suffix=dataset.t_max)
+            x0_wrapped = x0_batch.wrap(prefix=0.0, suffix=dataset.t_max)
+            loss = flow.compute_loss(model_fn, x0_wrapped, x1_wrapped, generator=gen)
 
         optimizer.zero_grad()
         loss.backward()
@@ -219,10 +455,16 @@ def main():
         if step % args.eval_every == 0:
             model.eval()
             with torch.no_grad():
-                x0_sample = noise.sample(args.n_val_samples, generator=gen)
+                n_s = n_eval if is_cond else args.n_val_samples
+                if is_cond:
+                    eval_conds = val_conds[:n_s].to(args.device)
+                    model_eval = functools.partial(model, cond=eval_conds)
+                else:
+                    model_eval = model
+                x0_sample = noise.sample(n_s, generator=gen)
                 x0_sample = x0_sample.to(args.device).wrap(prefix=0.0, suffix=dataset.t_max)
-                result, n_ins, n_del = ef.sample(model, x0_sample,
-                                                  n_steps=args.n_sample_steps, generator=gen)
+                result, n_ins, n_del = flow.sample(model_eval, x0_sample,
+                                                    n_steps=args.n_sample_steps, generator=gen)
 
             gen_lens = list(result.seq_lens)
             wd = compute_w1(gen_lens, ref_lens)
@@ -239,6 +481,7 @@ def main():
                 torch.save({
                     'step': step, 'model': model.state_dict(), 'args': vars(args),
                     'best_wd': best_wd, 'stats': dataset.stats, 'd_max': d_max,
+                    'variant': args.variant, 'cond_dim': cond_dim,
                 }, os.path.join(args.outdir, 'best.pt'))
 
             model.train()
