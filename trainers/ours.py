@@ -1,13 +1,12 @@
-"""Training script for Edit Flow cascade model.
+"""OURS model trainer: Edit Flow cascade generation.
 
-Variants:
-  uncond  - tree noise + Flow Matching, no conditioning  (replaces old 'full')
+Variants (only active when --model OURS):
+  uncond  - tree noise + Flow Matching, no conditioning
   bert    - tree noise + Flow Matching + BERT text conditioning
-  motive  - tree noise + Flow Matching + 14-dim motivation score conditioning
+  motive  - tree noise + Flow Matching + 9-dim burst score conditioning
   flat    - flat Poisson noise, no tree structure  (ablation: W/o Tree)
   ddpm    - HPP noise + DDPM-style denoising       (ablation: W/o Flowmatching)
 """
-import argparse
 import functools
 import os
 import numpy as np
@@ -21,7 +20,6 @@ from editflow_model import EditFlowTransformer
 # ---- Raw cascade processing helpers ----
 
 def _process_cascade_raw(cascade):
-    """Process a raw cascade dict into times/depths/parent_times tensors."""
     root_user = cascade['root_user']
     nodes = cascade['nodes']
     t_max = cascade.get('t_max', 1.0)
@@ -53,7 +51,6 @@ def _process_cascade_raw(cascade):
 
 
 def _encode_bert(texts, bert_name='bert-base-uncased', device='cpu', batch_size=64):
-    """Pre-compute BERT CLS embeddings for a list of texts. Returns list of (768,) tensors."""
     from transformers import AutoTokenizer, AutoModel
     print(f'Loading BERT model: {bert_name}')
     tokenizer = AutoTokenizer.from_pretrained(bert_name)
@@ -74,13 +71,12 @@ def _encode_bert(texts, bert_name='bert-base-uncased', device='cpu', batch_size=
         torch.cuda.empty_cache()
     embs = torch.cat(all_embs, dim=0)
     print(f'BERT encoding done: {embs.shape}')
-    return list(embs)  # list of (768,) tensors
+    return list(embs)
 
 
 # ---- Datasets ----
 
 class CascadeSeqDataset(Dataset):
-    """Dataset from pre-processed .pt file (no conditioning)."""
     def __init__(self, processed_path, max_events=500):
         data = torch.load(processed_path, map_location='cpu', weights_only=False)
         self.items = []
@@ -109,52 +105,71 @@ class CascadeSeqDataset(Dataset):
 
 
 class CondCascadeDataset(Dataset):
-    """Loads socialnet_cascades_with_motivation.pt and builds conditioning vectors.
+    """Conditioning dataset.
 
-    cond_type='bert':   768-dim BERT CLS embedding of cascade text
-    cond_type='motive': 14-dim motivation scores (normalized to [0,1])
+    cond_type='bert':   768-dim BERT CLS embedding (raw cascade format)
+    cond_type='motive': 9-dim burst scores from *_burst.pt processed format
     """
-    COND_DIM = {'bert': 768, 'motive': 14}
+    COND_DIM = {'bert': 768, 'motive': 9}
 
-    def __init__(self, raw_cond_path, cond_type, max_events=500,
+    def __init__(self, cond_path, cond_type, max_events=500,
                  bert_name='bert-base-uncased', bert_device='cpu'):
         assert cond_type in self.COND_DIM, f'Unknown cond_type: {cond_type}'
-        raw = torch.load(raw_cond_path, map_location='cpu', weights_only=False)
-        self.items, self.conds, texts = [], [], []
-        for c in raw:
-            if len(c.get('nodes', [])) == 0:
-                continue
-            if cond_type == 'motive' and 'motivation_scores' not in c:
-                continue
-            proc = _process_cascade_raw(c)
-            t = proc['times'][:max_events].tolist()
-            if not t:
-                continue
-            self.items.append((
-                t,
-                proc['depths'][:max_events].tolist(),
-                proc['parent_times'][:max_events].tolist(),
-            ))
-            if cond_type == 'motive':
-                self.conds.append(c['motivation_scores'].float() / 5.0)
-            else:
+        self.items, self.conds = [], []
+
+        if cond_type == 'motive':
+            data = torch.load(cond_path, map_location='cpu', weights_only=False)
+            for c in data['cascades']:
+                if len(c['times']) == 0:
+                    continue
+                t = c['times'][:max_events].tolist()
+                if not t:
+                    continue
+                self.items.append((
+                    t,
+                    c['depths'][:max_events].tolist(),
+                    c['parent_times'][:max_events].tolist(),
+                ))
+                self.conds.append(c.get('burst_scores', torch.zeros(9)).float())
+            self.stats = data['stats']
+            counts = [len(it[0]) for it in self.items]
+            all_d = [d for _, ds, _ in self.items for d in ds]
+            self.d_max = self.stats.get('D_max', max(all_d) if all_d else 2)
+        else:
+            texts = []
+            raw = torch.load(cond_path, map_location='cpu', weights_only=False)
+            for c in raw:
+                if len(c.get('nodes', [])) == 0:
+                    continue
+                proc = _process_cascade_raw(c)
+                t = proc['times'][:max_events].tolist()
+                if not t:
+                    continue
+                self.items.append((
+                    t,
+                    proc['depths'][:max_events].tolist(),
+                    proc['parent_times'][:max_events].tolist(),
+                ))
                 texts.append(c.get('text', ''))
-        if cond_type == 'bert':
             self.conds = _encode_bert(texts, bert_name, bert_device)
+            counts = [len(it[0]) for it in self.items]
+            all_d = [d for _, ds, _ in self.items for d in ds]
+            self.d_max = max(all_d) if all_d else 2
+            self.stats = {
+                'D_max': self.d_max, 'n_max': max(counts),
+                'n_cascades': len(self.items), 'avg_len': sum(counts) / len(counts),
+            }
 
         counts = [len(it[0]) for it in self.items]
-        all_d = [d for _, ds, _ in self.items for d in ds]
         hist = torch.zeros(max(counts) + 1)
         for c in counts:
             hist[c] += 1
         self.count_dist = hist / hist.sum()
         self.t_max = 1.0
-        self.d_max = max(all_d) if all_d else 2
         self.cond_dim = self.COND_DIM[cond_type]
-        self.stats = {
-            'D_max': self.d_max, 'n_max': max(counts),
-            'n_cascades': len(self.items), 'avg_len': sum(counts) / len(counts),
-        }
+        self.stats.setdefault('n_max', max(counts))
+        self.stats.setdefault('n_cascades', len(self.items))
+        self.stats.setdefault('avg_len', sum(counts) / len(counts))
         print(f'CondCascadeDataset: {len(self.items)} cascades, cond_dim={self.cond_dim}')
 
     def __len__(self):
@@ -183,7 +198,6 @@ def collate_fn_cond(batch):
 # ---- Noise generators ----
 
 class TreeNoise:
-    """Structurally valid random trees as noise (valid cascade tree by random attachment)."""
     def __init__(self, count_dist, t_max, d_max):
         self.count_dist = count_dist
         self.t_max = t_max
@@ -219,7 +233,6 @@ class TreeNoise:
 
 
 class FlatNoise:
-    """Flat Poisson noise: same count distribution but no tree structure (depth=0, parent_time=0)."""
     def __init__(self, count_dist, t_max):
         self.count_dist = count_dist
         self.t_max = t_max
@@ -240,7 +253,6 @@ class FlatNoise:
 
 
 class HPPNoise:
-    """High-rate Homogeneous Poisson Process noise for the DDPM variant."""
     def __init__(self, lambda_hpp, t_max):
         self.lambda_hpp = lambda_hpp
         self.t_max = t_max
@@ -269,60 +281,54 @@ def compute_w1(gen_lens, ref_lens):
     return float(wasserstein_distance(g / mean_r, r / mean_r))
 
 
-# ---- Args ----
-
-def get_args():
-    p = argparse.ArgumentParser()
-    p.add_argument('--variant', choices=['uncond', 'bert', 'motive', 'flat', 'ddpm'],
-                   default='uncond',
-                   help='uncond=no cond, bert=BERT text cond, motive=14-dim motivation cond, '
-                        'flat=W/o Tree, ddpm=W/o Flowmatching')
-    p.add_argument('--data', default='dataset/socialnet_processed.pt',
-                   help='Pre-processed data path (used for uncond/flat/ddpm)')
-    p.add_argument('--cond_data', default='dataset/socialnet_cascades_with_motivation.pt',
-                   help='Raw data with motivation scores (used for bert/motive)')
-    p.add_argument('--bert_model', default='pretrained/bert-base-chinese',
-                   help='BERT model local path or HuggingFace name (used for bert variant)')
-    p.add_argument('--bert_device', default='cpu',
-                   help='Device for pre-computing BERT embeddings')
-    p.add_argument('--outdir', default='runs_editflow')
-    p.add_argument('--hidden_dim', type=int, default=128)
-    p.add_argument('--n_heads', type=int, default=4)
-    p.add_argument('--n_layers', type=int, default=4)
-    p.add_argument('--n_ins_bins', type=int, default=64)
-    p.add_argument('--delta', type=float, default=0.05)
-    p.add_argument('--gamma', type=float, default=0.3)
-    p.add_argument('--rate_penalty', type=float, default=1.0)
-    p.add_argument('--lambda_hpp', type=float, default=50.0)
-    p.add_argument('--max_events', type=int, default=500)
-    p.add_argument('--max_steps', type=int, default=30000)
-    p.add_argument('--batch_size', type=int, default=128)
-    p.add_argument('--lr', type=float, default=3e-4)
-    p.add_argument('--eval_every', type=int, default=1000)
-    p.add_argument('--n_sample_steps', type=int, default=100)
-    p.add_argument('--n_val_samples', type=int, default=500)
-    p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    return p.parse_args()
-
-
 def _make_flat_batch(batch):
-    """Strip tree structure: set all depth=0 and parent_time=0."""
     seqs = batch.split_sequences()
     return DataBatch.from_sequences(seqs)
 
 
-# ---- Training ----
+# ---- Public interface ----
 
-def main():
-    args = get_args()
+def add_args(parser):
+    parser.add_argument('--variant', choices=['uncond', 'bert', 'motive', 'flat', 'ddpm'],
+                        default='uncond',
+                        help='uncond=no cond, bert=BERT text cond, motive=9-dim burst score cond, '
+                             'flat=W/o Tree, ddpm=W/o Flowmatching')
+    parser.add_argument('--data', default='dataset/socialnet_processed.pt',
+                        help='Pre-processed data path (used for uncond/flat/ddpm)')
+    parser.add_argument('--cond_data', default='dataset/APS_burst.pt',
+                        help='*_burst.pt for motive; raw motivation pt for bert '
+                             '(e.g. APS_burst.pt / WeiboCov_burst.pt / RedditM_burst.pt)')
+    parser.add_argument('--bert_model', default='pretrained/bert-base-chinese',
+                        help='BERT model path or HuggingFace name (bert variant)')
+    parser.add_argument('--bert_device', default='cpu',
+                        help='Device for pre-computing BERT embeddings')
+    parser.add_argument('--outdir', default='runs_editflow')
+    parser.add_argument('--hidden_dim', type=int, default=128)
+    parser.add_argument('--n_heads', type=int, default=4)
+    parser.add_argument('--n_layers', type=int, default=4)
+    parser.add_argument('--n_ins_bins', type=int, default=64)
+    parser.add_argument('--delta', type=float, default=0.05)
+    parser.add_argument('--gamma', type=float, default=0.3)
+    parser.add_argument('--rate_penalty', type=float, default=1.0)
+    parser.add_argument('--lambda_hpp', type=float, default=50.0)
+    parser.add_argument('--max_events', type=int, default=500)
+    parser.add_argument('--max_steps', type=int, default=30000)
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--eval_every', type=int, default=1000)
+    parser.add_argument('--n_sample_steps', type=int, default=100)
+    parser.add_argument('--n_val_samples', type=int, default=500)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def train(args):
     torch.manual_seed(args.seed)
     os.makedirs(args.outdir, exist_ok=True)
 
     is_cond = args.variant in ('bert', 'motive')
-    print(f'Variant: {args.variant}')
+    print(f'Model: OURS  Variant: {args.variant}')
 
-    # ---- Load dataset ----
     print('Loading data...')
     if is_cond:
         dataset = CondCascadeDataset(
@@ -354,16 +360,14 @@ def main():
           f'D_max={d_max}, cond_dim={cond_dim}')
     print(f'Ref lengths: mean={np.mean(ref_lens):.1f}, median={np.median(ref_lens):.0f}')
 
-    # Pre-fetch val conditioning vectors for eval loop
     if is_cond:
         n_eval = min(args.n_val_samples, len(val_set))
         val_cond_list = [dataset.conds[val_set.indices[i]] for i in range(n_eval)]
-        val_conds = torch.stack(val_cond_list)  # (n_eval, cond_dim), kept on CPU
+        val_conds = torch.stack(val_cond_list)
     else:
         n_eval = args.n_val_samples
         val_conds = None
 
-    # ---- Variant-specific setup ----
     if args.variant in ('uncond', 'bert', 'motive'):
         noise = TreeNoise(dataset.count_dist, dataset.t_max, d_max)
         flow = EditFlow(n_ins_bins=args.n_ins_bins, delta=args.delta,
@@ -385,8 +389,7 @@ def main():
         hidden_dim=args.hidden_dim, n_heads=args.n_heads, n_layers=args.n_layers,
         n_ins_bins=args.n_ins_bins, d_max=d_max, t_max=dataset.t_max, cond_dim=cond_dim,
     ).to(args.device)
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f'Model params: {n_params:,}')
+    print(f'Model params: {sum(p.numel() for p in model.parameters()):,}')
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -487,7 +490,113 @@ def main():
             model.train()
 
     print(f'Training complete. Best W1: {best_wd:.4f}')
+    test(args)
 
 
-if __name__ == '__main__':
-    main()
+def test(args):
+    """Evaluate the best checkpoint on the held-out test split."""
+    import functools
+    from .metrics import eval_metrics, print_and_save, get_test_split, to_numpy_seq
+    torch.manual_seed(args.seed)
+
+    ckpt_path = os.path.join(args.outdir, 'best.pt')
+    if not os.path.exists(ckpt_path):
+        print(f'No checkpoint at {ckpt_path}, skipping test.')
+        return None
+
+    ckpt  = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    saved = ckpt.get('args', {})
+    variant  = saved.get('variant', args.variant)
+    is_cond  = variant in ('bert', 'motive')
+    cond_dim = ckpt.get('cond_dim', saved.get('cond_dim', 0))
+    d_max    = ckpt.get('d_max', saved.get('d_max', 2))
+
+    print('Loading data for test...')
+    if is_cond:
+        dataset = CondCascadeDataset(
+            saved.get('cond_data', args.cond_data),
+            cond_type=variant,
+            max_events=saved.get('max_events', args.max_events),
+            bert_name=saved.get('bert_model', args.bert_model),
+            bert_device=args.bert_device,
+        )
+    else:
+        dataset = CascadeSeqDataset(
+            saved.get('data', args.data),
+            max_events=saved.get('max_events', args.max_events),
+        )
+
+    test_set = get_test_split(dataset, args)
+    ref_seqs = [to_numpy_seq(dataset.items[i][0]) for i in test_set.indices]
+    n_test   = len(ref_seqs)
+
+    model = EditFlowTransformer(
+        hidden_dim=saved.get('hidden_dim', args.hidden_dim),
+        n_heads=saved.get('n_heads', args.n_heads),
+        n_layers=saved.get('n_layers', args.n_layers),
+        n_ins_bins=saved.get('n_ins_bins', args.n_ins_bins),
+        d_max=d_max,
+        t_max=dataset.t_max,
+        cond_dim=cond_dim,
+    ).to(args.device)
+    model.load_state_dict(ckpt['model'])
+    model.eval()
+
+    n_ins_bins = saved.get('n_ins_bins', args.n_ins_bins)
+    delta      = saved.get('delta', args.delta)
+    rate_pen   = saved.get('rate_penalty', args.rate_penalty)
+    gamma      = saved.get('gamma', args.gamma)
+
+    if variant in ('uncond', 'bert', 'motive'):
+        noise = TreeNoise(dataset.count_dist, dataset.t_max, d_max)
+        flow  = EditFlow(n_ins_bins=n_ins_bins, delta=delta,
+                         rate_penalty=rate_pen, gamma=gamma, d_max=d_max)
+    elif variant == 'flat':
+        noise = FlatNoise(dataset.count_dist, dataset.t_max)
+        flow  = EditFlow(n_ins_bins=n_ins_bins, delta=delta,
+                         rate_penalty=rate_pen, gamma=0.0, d_max=0)
+    else:  # ddpm
+        mean_n     = float(np.mean([len(item[0]) for item in dataset.items]))
+        lambda_hpp = saved.get('lambda_hpp', args.lambda_hpp) or 5.0 * mean_n
+        noise = HPPNoise(lambda_hpp=lambda_hpp, t_max=dataset.t_max)
+        flow  = DDPMFlow(n_ins_bins=n_ins_bins, lambda_hpp=lambda_hpp,
+                         t_max=dataset.t_max, rate_penalty=rate_pen, d_max=d_max)
+
+    gen = torch.Generator(device=args.device)
+    gen.manual_seed(args.seed + 1)
+
+    # build conditioning tensors for conditional variants
+    if is_cond:
+        test_conds = torch.stack(
+            [dataset.conds[i] for i in test_set.indices]
+        )
+    else:
+        test_conds = None
+
+    n_sample_steps = saved.get('n_sample_steps', args.n_sample_steps)
+    batch_size     = args.batch_size
+    gen_seqs = []
+
+    print(f'Generating for {n_test} test cascades (variant={variant})...')
+    with torch.no_grad():
+        for start in range(0, n_test, batch_size):
+            end = min(start + batch_size, n_test)
+            bs  = end - start
+            x0  = noise.sample(bs, generator=gen).to(args.device)
+            x0  = x0.wrap(prefix=0.0, suffix=dataset.t_max)
+            if is_cond:
+                cond_b = test_conds[start:end].to(args.device)
+                model_fn = functools.partial(model, cond=cond_b)
+            else:
+                model_fn = model
+            if variant == 'flat':
+                x0_batch = DataBatch.from_sequences(x0.split_sequences())
+                x0 = x0_batch.to(args.device).wrap(prefix=0.0, suffix=dataset.t_max)
+            result, _, _ = flow.sample(model_fn, x0,
+                                       n_steps=n_sample_steps, generator=gen)
+            for seq in result.split_sequences():
+                gen_seqs.append(to_numpy_seq(seq))
+
+    m = eval_metrics(gen_seqs, ref_seqs, t_max=dataset.t_max)
+    print_and_save(m, args.outdir)
+    return m

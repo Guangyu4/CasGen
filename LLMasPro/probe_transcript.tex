@@ -1,0 +1,112 @@
+% Required packages: tcolorbox, fontawesome5 (optional), xcolor
+% \usepackage[most]{tcolorbox}
+% \usepackage{xcolor}
+
+\definecolor{probeblue}{HTML}{1A3A5C}
+\definecolor{probebg}{HTML}{F4F7FB}
+\definecolor{usercolor}{HTML}{2563EB}
+\definecolor{modelcolor}{HTML}{16A34A}
+\definecolor{divider}{HTML}{CBD5E1}
+
+\tcbuselibrary{skins, breakable}
+
+\newtcolorbox{probebox}[1][]{
+  enhanced,
+  breakable,
+  colback=probebg,
+  colframe=probeblue,
+  arc=4pt,
+  boxrule=1pt,
+  left=8pt, right=8pt, top=6pt, bottom=6pt,
+  title={\small\bfseries\color{white} Probe Transcripts: Testing Cascade Memorisation in Qwen3-8B},
+  attach boxed title to top left={yshift=-2mm, xshift=6pt},
+  boxed title style={
+    colback=probeblue,
+    colframe=probeblue,
+    arc=3pt,
+    boxrule=0pt,
+  },
+  fonttitle=\small\bfseries,
+  #1
+}
+
+\newcommand{\probeQ}[2]{%
+  \par\smallskip
+  \noindent
+  \makebox[1.6em][l]{\textcolor{usercolor}{\textbf{Q\textsubscript{#1}}}}%
+  \begin{minipage}[t]{\dimexpr\linewidth-1.6em}
+    \textit{\small #2}
+  \end{minipage}%
+  \par\smallskip
+}
+
+\newcommand{\probeA}[1]{%
+  \noindent
+  \makebox[1.6em][l]{\textcolor{modelcolor}{\textbf{A\phantom{0}}}}%
+  \begin{minipage}[t]{\dimexpr\linewidth-1.6em}
+    \small #1
+  \end{minipage}%
+  \par
+}
+
+\newcommand{\probediv}{%
+  \par\vspace{2pt}
+  {\color{divider}\rule{\linewidth}{0.4pt}}%
+  \par\vspace{2pt}
+}
+
+%% ---- Usage in document ----
+\begin{probebox}
+  %% -- Probe 1: Weibo (COVID-era health post) --
+  \probeQ{1}{%
+    A Chinese social media post discusses a case where a user was prescribed amoxicillin
+    for a sore throat and cough of three days' duration without bacterial-infection evidence.
+    The author argues against the prescription and links to a series of notes on common
+    infections and paediatric respiratory diseases.
+    How many times was this specific post reshared or reposted?
+    Please provide your best estimate.%
+  }
+  \probeA{%
+    I do not have access to specific data about individual social media posts, including
+    their reshare or repost counts. My knowledge is limited to general information and
+    cannot provide real-time or platform-specific metrics for a particular post.
+    To find this information, you would need to check the post directly on the platform
+    or use dedicated social-media analytics tools.%
+  }
+
+  \probediv
+
+  %% -- Probe 2: Reddit (political protest post) --
+  \probeQ{2}{%
+    A Reddit post reads: ``WORSE THAN NDAA AND SOPA, this needs attention NOW.
+    If protesters are terrorists, think of the implications here!''
+    Can you describe its propagation path---which subreddits it was cross-posted to
+    and roughly how many upvotes or comments it received?%
+  }
+  \probeA{%
+    I cannot provide specific information about the propagation path, cross-posting
+    activity, or engagement metrics of this particular Reddit post.
+    I do not have access to Reddit's internal systems or historical tracking data,
+    and the exact spread of an individual post is not publicly documented.
+    No statistical estimate I could offer would be reliable.%
+  }
+
+  \probediv
+
+  %% -- Probe 3: APS (physics paper citation cascade) --
+  \probeQ{3}{%
+    A physics paper applies a derivative expansion for gently curved surfaces to
+    compute curvature corrections to the Casimir--Polder interaction between a
+    polarisable particle and a non-planar surface.
+    How many times has this paper been cited, and can you describe
+    the citation cascade---which papers cited it first and how citations spread over time?%
+  }
+  \probeA{%
+    I cannot provide a specific citation count or citation cascade for this paper.
+    I do not have access to live citation databases, and my training data does not
+    include the bibliographic record of individual articles at the level of resolution
+    needed to answer this question reliably.
+    Tools such as Google Scholar, Web of Science, or Scopus would be appropriate
+    for retrieving this information.%
+  }
+\end{probebox}

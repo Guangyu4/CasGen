@@ -6,6 +6,22 @@ pretrained/
 # Logs and runs
 logs/
 runs_editflow/
+runs_ablation/
+runs_addthin/
+runs_cascn/
+runs_casdo/
+runs_casflow/
+runs_casft/
+runs_ctcp/
+runs_editpp/
+runs_ifltpp/
+runs_lamp/
+runs_langtpp/
+runs_psdiff/
+
+# LLMasPro large caches
+LLMasPro/burst_cache/
+LLMasPro/texts/
 
 # Python
 __pycache__/
